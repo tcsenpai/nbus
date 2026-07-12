@@ -20,7 +20,7 @@ import {
   type JsonValue,
   type SignedEnvelope,
   type EncryptedEnvelope,
-} from "../src/crypto.ts";
+} from "../sdk/typescript/src/crypto.ts";
 
 // ── Vector schema (mirrors tests/crypto-vectors.json) ────────────────────────
 

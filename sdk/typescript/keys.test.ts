@@ -24,7 +24,7 @@ function newBus(): NBus {
 beforeAll(async () => {
   if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH);
 
-  daemon = Bun.spawn(["bun", "run", "src/daemon.ts"], {
+  daemon = Bun.spawn(["bun", "run", "../../src/daemon.ts"], {
     env: {
       ...process.env,
       NBUS_SOCKET: SOCKET_PATH,

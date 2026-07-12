@@ -1,7 +1,9 @@
-// Back-compatible root entrypoint for `import ... from "nbus"`.
-// Server half (Bus/Bucket) lives here; client half is re-exported from the
-// standalone @nbus/client SDK, the single source of truth for that surface.
-export { Bus, Bucket, type Event, type ValueChange } from "./bus";
+// Public API surface of the @nbus/client SDK.
+//
+// Single source of truth for the TypeScript client + optional crypto layer.
+// The nbus server (Bus/Bucket/daemon) lives in the repo root and re-exports
+// this package for the back-compatible `import ... from "nbus"` entrypoint.
+
 export {
   NBus,
   emit,
@@ -22,4 +24,4 @@ export {
   type EncryptedEnvelope,
   type Ed25519Keypair,
   type X25519Keypair,
-} from "../sdk/typescript/src/index";
+} from "./client";

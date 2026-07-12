@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { NBus } from "./client";
+import { NBus } from "../sdk/typescript/src/client";
 
 const args = process.argv.slice(2);
 const cmd = args[0]?.toLowerCase();
