@@ -1,10 +1,16 @@
 # nbus — Crypto Envelope Specification (v0.1)
 
-> **Status: FROZEN — implementation in progress.** This document defines an
-> OPTIONAL, protocol-level envelope for signed and/or encrypted nbus payloads.
-> Enveloping is always a client choice, per message; a daemon and a plain client
-> that never opt in are completely unaffected. The open questions in §8 are
-> resolved (see §8 for the decisions).
+> **Status: v0.1 — implemented.** This document defines an OPTIONAL,
+> protocol-level envelope for signed and/or encrypted nbus payloads. Enveloping
+> is always a client choice, per message; a daemon and a plain client that never
+> opt in are completely unaffected. The open questions in §8 are resolved (see §8
+> for the decisions).
+>
+> **Implementation:** core primitives in [`src/crypto.ts`](src/crypto.ts)
+> (JCS, `s1`/`e1`, sign-then-encrypt, keypairs; zero deps beyond `node:crypto`);
+> SDK options + `_keys` helpers in [`src/client.ts`](src/client.ts); conformance
+> vectors in [`tests/crypto-vectors.json`](tests/crypto-vectors.json) (schema:
+> [`tests/crypto-vectors.schema.md`](tests/crypto-vectors.schema.md)).
 
 ---
 
@@ -17,7 +23,8 @@
 2. **Optional and interoperable.** A plain payload and an enveloped payload MUST
    coexist on the same bucket/key. Enveloping is a client choice, per message.
 3. **Zero new dependencies.** All primitives come from Bun's WebCrypto
-   (`crypto.subtle`) / `node:crypto`. No libsodium, no npm crypto libs.
+   (`crypto.subtle`) / `node:crypto`. No libsodium, no npm crypto libs. The
+   shipped implementation uses `node:crypto` only.
 4. **One obvious way.** ed25519 for signatures, X25519→AES-256-GCM for
    encryption. No cipher menu, no RSA, no negotiation. Fewer choices = fewer
    footguns.
@@ -65,14 +72,15 @@ All binary fields are **base64url without padding** (RFC 4648 §5).
 }
 ```
 
-- **Signing input** is the deterministic UTF-8 serialization of the object
-  `{ "$nbus":"s1", "alg":"ed25519", "pub":..., "ts":..., "payload":... }` with
-  keys in **exactly that order** and `payload` serialized canonically (§3.4).
-  `sig` is then added. Verifiers reconstruct the same bytes and check `sig`
-  against `pub`.
+- **Signing input** is the JCS (§3.4) canonicalization of the object
+  `{ "$nbus":"s1", "alg":"ed25519", "pub":..., "ts":..., "payload":... }`.
+  Because JCS sorts keys by UTF-16 code unit, the signing input frame is emitted
+  in the order **`$nbus, alg, payload, pub, ts`** (see §3.4 — JCS ordering is
+  authoritative and reorders the frame keys). `sig` is then added. Verifiers
+  reconstruct the same bytes and check `sig` against `pub`.
 - **`ts`** is unix seconds at signing. Verifiers MAY reject envelopes whose `ts`
-  is outside an acceptable clock-skew window (default suggestion: ±300s) to
-  bound replay. `ts` is inside the signed bytes, so it cannot be altered.
+  is outside an acceptable clock-skew window (default ±300s) to bound replay.
+  `ts` is inside the signed bytes, so it cannot be altered.
 - Identity = the `pub` key. Trust is the verifier's business (see §5).
 
 ### 3.2 Encrypted envelope (`$nbus: "e1"`)
@@ -95,7 +103,8 @@ derive a 256-bit key, then AES-256-GCM.
 - **Key agreement:** `shared = X25519(eph_priv, recipient_pub)`.
 - **KDF:** `key = HKDF-SHA-256(ikm=shared, salt=epk, info="nbus-e1", len=32)`.
 - **AEAD:** `ct = AES-256-GCM(key, iv, plaintext, aad?)`. `iv` MUST be unique
-  per message (random 12 bytes is fine given ephemeral keys).
+  per message (random 12 bytes is fine given ephemeral keys). The 16-byte GCM
+  tag is appended to the ciphertext inside `ct`.
 - **Plaintext** is the canonical (§3.4) UTF-8 JSON of the real payload.
 - Recipient derives the same `key` with `X25519(recipient_priv, epk)` and
   decrypts. A failed tag = reject (fail closed).
@@ -112,6 +121,10 @@ of an **`e1`** envelope. Recipients decrypt `e1`, then verify the inner `s1`.
 Rationale for sign-then-encrypt: the signature is not exposed to non-recipients,
 and the verified identity is bound to the confidential content.
 
+Shipped as `sealSignedEncrypted()` / `openSignedEncrypted()` in `src/crypto.ts`;
+the SDK triggers it automatically when both `sign` and `encryptTo` are supplied
+(§4).
+
 ### 3.4 Canonical JSON — RFC 8785 (JCS)
 
 To make signatures reproducible across languages, hashed/encrypted JSON uses
@@ -122,75 +135,122 @@ To make signatures reproducible across languages, hashed/encrypted JSON uses
 - Object keys sorted by UTF-16 code unit.
 - Numbers serialized per JCS (ECMAScript `Number` canonical form).
 
-The **envelope frame** (§3.1 keys `$nbus`, `alg`, `pub`, `ts`, `payload`) is
-emitted in the stated fixed order for the signing input; the `payload` value and
-any nested objects are JCS-serialized. Integers are strongly preferred in signed
-payloads for readability, but JCS pins float formatting so non-integers also
-interoperate.
+JCS ordering is **authoritative and applies to the whole envelope frame**: the
+`s1` frame keys are canonicalized alongside `payload`, so the signed bytes carry
+the keys in JCS order (`$nbus, alg, payload, pub, ts`), not the source order.
+The `payload` value and any nested objects are likewise JCS-serialized. Integers
+are strongly preferred in signed payloads for readability, but JCS pins float
+formatting so non-integers also interoperate.
 
 > Canonicalization is the fiddliest cross-language part. The conformance vectors
-> (§7) pin exact bytes so every SDK agrees. Using standard JCS means any
-> language's off-the-shelf JCS library produces identical bytes to our
-> zero-dependency implementation.
+> (§7) pin exact bytes so every SDK agrees — each `sign` vector includes the
+> exact `signingInput` string, which is gold for debugging a foreign impl before
+> blaming the signature. Using standard JCS means any language's off-the-shelf
+> JCS library produces identical bytes to our zero-dependency implementation.
 
 ---
 
-## 4. SDK API (reference shape)
+## 4. SDK API
 
-The TypeScript SDK (`src/client.ts`) gains an optional crypto layer. Illustrative:
+The TypeScript SDK (`src/client.ts`) exposes the crypto layer via two option
+bags — `SendCryptoOptions` (outbound) and `RecvCryptoOptions` (inbound) — plus
+re-exported `Keypair`, `isEnvelope`, and `envelopeKind` from `src/crypto.ts`.
 
 ```typescript
-import { NBus, Keypair } from "./client";
+import { NBus, Keypair, isEnvelope } from "./src/client";
 
-// Generate / load identities
-const signer = await Keypair.ed25519();          // { publicKey, privateKey, ... }
-const recipient = await Keypair.x25519();
+// Generate / load identities. Keypair factories return objects whose
+// `publicKeyB64` is the base64url raw 32-byte public key (the wire identity).
+const signer = await Keypair.ed25519();     // Ed25519Keypair
+const recipient = await Keypair.x25519();   // X25519Keypair
 
 const bus = new NBus();
 
-// Emit signed
+// Emit signed  → s1 envelope
 await bus.emit("audit", "login", { user: "alice" }, { sign: signer });
 
-// Emit encrypted to a recipient
-await bus.emit("secrets", "token", { t: "..." }, { encryptTo: recipient.publicKey });
-
-// Emit signed + encrypted
+// Emit encrypted to a recipient → e1 envelope.
+// encryptTo takes the recipient's base64url X25519 public key (a string),
+// NOT the keypair object.
 await bus.emit("secrets", "token", { t: "..." },
-  { sign: signer, encryptTo: recipient.publicKey });
+  { encryptTo: recipient.publicKeyB64 });
+
+// Emit signed + encrypted → sign-then-encrypt (e1 wrapping an inner s1)
+await bus.emit("secrets", "token", { t: "..." },
+  { sign: signer, encryptTo: recipient.publicKeyB64 });
 
 // Listen with verification/decryption. Fails closed: an envelope that does not
-// verify/decrypt is delivered as an error, never as trusted data.
-for await (const ev of bus.listen("audit", "login", {
-  verify: (pub) => trustedPubs.has(pub),   // trust predicate; return false → reject
-  decryptWith: recipient,                   // for e1 envelopes
+// verify/decrypt is delivered as an error item (error set, data undefined),
+// never as trusted data.
+for await (const item of bus.listen("audit", "login", {
+  verify: (pub, env) => trustedPubs.has(pub), // trust predicate; false → reject
+  decryptWith: recipient,                     // X25519Keypair, for e1 envelopes
+  maxSkewSeconds: 300,                        // optional freshness window
 })) {
-  // ev.data = verified/decrypted payload; ev.signedBy = pub (if s1); ev.encrypted = bool
+  if (item.error) { handleReject(item.error, item.raw); continue; }
+  // item.data     = verified/decrypted payload
+  // item.signedBy = signer pub (base64url) when an accepted s1 was present
+  // item.encrypted = true when the item arrived inside an e1 envelope
 }
 ```
 
-Same option shapes apply to `set` / `get` / `watch` for state values.
+### Delivery-item shape
+
+`listen` yields `ListenItem`, `watch` (with recv opts) yields `WatchItem`, and
+`get` (with recv opts) resolves a `GetResult`. All carry the same crypto
+metadata:
+
+| Field | Meaning |
+|-------|---------|
+| `data` | cleartext payload (present on accept; `undefined`/`null` on reject) |
+| `signedBy` | verified ed25519 signer pub (base64url), only for accepted `s1` |
+| `encrypted` | `true` when the item arrived inside an `e1` envelope |
+| `error` | set on a fail-closed reject; `data` is then absent |
+| `raw` | the offending envelope on a reject, for inspection |
+
+(`ListenItem` also carries `bucket`/`event`; `GetResult.data` is `T | null`.)
+
+### `get` / `watch` are overloaded
+
+Both are backward compatible via overloads keyed on whether recv options are
+passed:
+
+- **No opts** → the bare pre-crypto shape: `get` resolves `T | null`, `watch`
+  yields `T`. Envelopes are NOT interpreted; the value is delivered verbatim.
+- **With `RecvCryptoOptions`** → `get` resolves `GetResult<T>`, `watch` yields
+  `WatchItem<T>`, with the crypto metadata above and fail-closed handling.
+
+`set` takes `SendCryptoOptions` as its 4th arg, exactly like `emit`.
 
 **Rules:**
-- Sending options absent → plain payload (backward compatible).
-- Receiving without verify/decrypt options → enveloped messages are surfaced
-  RAW (the envelope object) so the caller can handle them, but the SDK MUST NOT
-  silently strip/trust them. Provide a helper to detect `isEnvelope(data)`.
-- `verify` predicate absent but an `s1` arrives → deliver with `signedBy` set and
-  `verified:false`? No — **fail closed**: require an explicit
-  `verify: () => true` to accept any signer. No accidental trust.
+- Sending options absent → plain payload (byte-for-byte identical to the
+  pre-crypto path, backward compatible).
+- Receiving without recv options → enveloped messages are delivered verbatim as
+  `data` (opt-out); the SDK does NOT interpret or strip them. Use
+  `isEnvelope(data)` / `envelopeKind(data)` to detect one yourself.
+- A **`verify` predicate is REQUIRED to accept an `s1`**. An `s1` arriving under
+  recv options with no `verify` predicate is **rejected** (`error` set), never
+  trusted — pass `verify: () => true` to accept any signer explicitly. No
+  accidental trust. This also applies to the inner `s1` of a sign-then-encrypt
+  envelope.
+- `verify` receives `(pub, env)` — the verified signer pub plus the full parsed
+  `SignedEnvelope` (inspect `ts`, `alg`, etc.). A falsy return rejects.
 
 ---
 
 ## 5. Key discovery (optional convention)
 
 A lightweight, **non-normative** convention for clients to publish their public
-keys so peers can find them — still just ordinary bus state, no daemon logic:
+keys so peers can find them — still just ordinary bus state, no daemon logic.
+Shipped as `publishKeys` / `fetchKeys` / `watchKeys` on `NBus`:
 
 - Reserved bucket: **`_keys`**.
 - `SET _keys <name> <pubkey-record>` where the record is:
   ```json
   { "sign": "<base64url ed25519 pub>", "box": "<base64url x25519 pub>", "ts": 1720000000 }
   ```
+  At least one of `sign` / `box` is present; `ts` is the publish time (for
+  rotation).
 - `GET _keys <name>` to fetch; `WATCH _keys <name>` for rotation.
 - This is **TOFU** (trust on first use) at best — publishing a key here asserts
   nothing. Out-of-band verification (fingerprint comparison) is the user's
@@ -210,13 +270,16 @@ change" guarantee explicit and testable.
 
 ## 7. Conformance vectors (crypto)
 
-Extend `tests/vectors.json` philosophy with a `tests/crypto-vectors.json`: fixed
-keypairs (seeded), fixed plaintexts, and the exact expected canonical bytes,
-signatures, and ciphertext-decrypts. Because AES-GCM/X25519 use randomness (iv,
-epk), encryption vectors pin the **decrypt** direction (given epk+iv+ct+recip
-priv → plaintext) rather than encrypt output. Signature vectors pin exact `sig`
-bytes for given key+message (ed25519 is deterministic). These let any language
-SDK prove interop without a live peer.
+`tests/crypto-vectors.json` holds fixed keypairs (seeded), fixed plaintexts, and
+the exact expected canonical bytes, signatures, and ciphertext-decrypts. Because
+AES-GCM/X25519 use randomness (iv, epk), encryption vectors pin the **decrypt**
+direction (given epk+iv+ct+recipient priv → plaintext) rather than encrypt
+output. Signature vectors pin exact `sig` bytes for given key+message (ed25519 is
+deterministic) and include the exact `signingInput`. These let any language SDK
+prove interop without a live peer. The reference (Bun) runner is
+`tests/crypto-conformance.test.ts`; the file is regenerated by
+`tests/gen-crypto-vectors.ts`. Vector kinds and steps: see
+`tests/crypto-vectors.schema.md`.
 
 ---
 
@@ -232,11 +295,11 @@ SDK prove interop without a live peer.
    (zero new dependency) but conform to the standard so any language's JCS lib
    interoperates: UTF-8, no insignificant whitespace, object keys sorted by
    UTF-16 code unit, JSON-number canonical form per ECMAScript `Number.prototype.toString`.
-   This **replaces** the bespoke rule sketched in §3.4 — §3.4's fixed-order frame
-   keys still apply to the outer envelope frame, but every hashed/encrypted JSON
-   value (the `payload`, nested objects) is JCS-serialized. Integers strongly
-   preferred in signed payloads; JCS pins float formatting so non-integers are
-   also interoperable, just discouraged for readability.
+   JCS applies to the **whole** envelope frame: the `s1` frame keys are
+   canonicalized (yielding order `$nbus, alg, payload, pub, ts`) along with the
+   `payload` and any nested objects. Integers strongly preferred in signed
+   payloads; JCS pins float formatting so non-integers are also interoperable,
+   just discouraged for readability.
 4. **State signing carries `ts`.** `set`/`get`/`watch` use the same `s1`/`e1`
    envelopes as events, `ts` included, so state values get the same freshness /
    tamper-evidence guarantees. Last-writer-wins still governs storage; `ts` is
