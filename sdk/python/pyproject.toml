@@ -12,7 +12,9 @@ license = { text = "MIT" }
 authors = [{ name = "nbus" }]
 # Core has NO runtime dependencies (stdlib asyncio + json only).
 # Crypto dependency is added in task #16.
-dependencies = []
+dependencies = [
+    "cryptography>=49.0.0",
+]
 
 [project.optional-dependencies]
 dev = [

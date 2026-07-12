@@ -7,14 +7,32 @@ calls (``set``/``get``/``ping``/``stats``/``buckets``) and streaming generators
 :meth:`NBus._read_line`. This guarantees exactly-once, in-order delivery so a
 ``SET``'s ``OK`` can never be misassigned to a later ``GET`` — mirroring the
 reference TypeScript client (``src/client.ts``).
+
+Optional end-to-end crypto (CRYPTO.md v0.1) is wired in via per-call options:
+``emit``/``set`` take ``sign``/``encrypt_to`` (outbound envelopes), and
+``listen``/``get``/``watch`` take ``verify``/``decrypt_with`` (fail-closed
+inbound). With no options the paths are byte-for-byte identical to the
+pre-crypto behavior (backward compatible).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import time
 from types import TracebackType
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Callable, Optional
+
+from .crypto import (
+    Ed25519Keypair,
+    X25519Keypair,
+    decrypt,
+    encrypt_to,
+    envelope_kind,
+    seal_signed_encrypted,
+    sign as _sign,
+    verify_signed,
+)
 
 __all__ = ["NBus"]
 
@@ -22,14 +40,131 @@ BACKOFF_START_MS = 100
 BACKOFF_MAX_MS = 10_000
 PING_INTERVAL_S = 30.0
 
-# Reserved bucket for the (pure-convention) key-discovery layer. Kept here so the
-# crypto layer (task #16) can build on it without touching transport code.
+# Reserved bucket for the (pure-convention) key-discovery layer, CRYPTO.md §5.
 KEYS_BUCKET = "_keys"
+
+# Verify predicate: (pub, envelope) -> bool. Falsy return rejects the message.
+VerifyPredicate = Callable[[str, dict[str, Any]], bool]
 
 
 def _dumps(value: Any) -> str:
     """Serialize to compact single-line JSON (framing = one line per message)."""
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def _apply_send_crypto(
+    data: Any,
+    sign: Optional[Ed25519Keypair],
+    encrypt_to_pub: Optional[str],
+) -> Any:
+    """Apply outbound crypto options, returning the wire value to send.
+
+    With no options the input is returned unchanged (plain path, byte-for-byte).
+    Both options → sign-then-encrypt; ``sign`` only → ``s1``; ``encrypt_to``
+    only → ``e1``.
+    """
+    if sign is None and encrypt_to_pub is None:
+        return data
+    if sign is not None and encrypt_to_pub is not None:
+        return seal_signed_encrypted(data, sign, encrypt_to_pub)
+    if sign is not None:
+        return _sign(data, sign)
+    return encrypt_to(data, encrypt_to_pub)  # type: ignore[arg-type]
+
+
+def _resolve_recv_crypto(
+    value: Any,
+    verify: Optional[VerifyPredicate],
+    decrypt_with: Optional[X25519Keypair],
+    max_skew_seconds: Optional[float],
+    has_opts: bool,
+) -> dict[str, Any]:
+    """Resolve an inbound wire value into cleartext + metadata, fail-closed.
+
+    Returns a dict with either ``data`` (accepted) or ``error`` (rejected), plus
+    optional ``signed_by``/``encrypted``/``raw``. With no recv options the value
+    passes through verbatim as ``data`` (opt-out, backward compatible).
+    """
+    if not has_opts:
+        return {"data": value}
+
+    kind = envelope_kind(value)
+    if kind is None:
+        # Plain payload, even under recv opts → deliver as-is.
+        return {"data": value}
+
+    if kind == "s1":
+        if verify is None:
+            return {"error": "signed payload but no verify predicate", "raw": value}
+        ver = verify_signed(value, max_skew_seconds)
+        if not ver.ok:
+            return {"error": f"verify: {ver.reason}", "raw": value}
+        if not verify(ver.pub, value):
+            return {"error": "verify predicate rejected signer", "raw": value}
+        return {"data": ver.payload, "signed_by": ver.pub}
+
+    # kind == "e1"
+    if decrypt_with is None:
+        return {"error": "encrypted payload but no decrypt_with key", "raw": value}
+    dec = decrypt(value, decrypt_with)
+    if not dec.ok:
+        return {"error": f"decrypt: {dec.reason}", "raw": value}
+
+    # Sign-then-encrypt: inner s1 must also verify (still fail-closed).
+    if envelope_kind(dec.payload) == "s1":
+        inner = dec.payload
+        if verify is None:
+            return {
+                "error": "sealed signed payload but no verify predicate",
+                "encrypted": True,
+                "raw": value,
+            }
+        ver = verify_signed(inner, max_skew_seconds)
+        if not ver.ok:
+            return {"error": f"verify: {ver.reason}", "encrypted": True, "raw": value}
+        if not verify(ver.pub, inner):
+            return {
+                "error": "verify predicate rejected signer",
+                "encrypted": True,
+                "raw": value,
+            }
+        return {"data": ver.payload, "signed_by": ver.pub, "encrypted": True}
+
+    return {"data": dec.payload, "encrypted": True}
+
+
+def _parse_key_record(v: Any) -> Optional[dict[str, Any]]:
+    """Validate an unknown value as a KeyRecord. Shape check only (not trust)."""
+    if not isinstance(v, dict):
+        return None
+    ts = v.get("ts")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return None
+    sign = v.get("sign")
+    box = v.get("box")
+    has_sign = isinstance(sign, str)
+    has_box = isinstance(box, str)
+    if sign is not None and not has_sign:
+        return None
+    if box is not None and not has_box:
+        return None
+    if not has_sign and not has_box:
+        return None
+    rec: dict[str, Any] = {"ts": ts}
+    if has_sign:
+        rec["sign"] = sign
+    if has_box:
+        rec["box"] = box
+    return rec
+
+
+def _pub_of(k: Any) -> Optional[str]:
+    """Extract a base64url public key from a Keypair or raw string; None passes."""
+    if k is None:
+        return None
+    if isinstance(k, str):
+        return k
+    return k.public_key_b64
 
 
 class _ListenSub:
@@ -219,32 +354,97 @@ class NBus:
     # Public API
     # ------------------------------------------------------------------ #
 
-    async def emit(self, bucket: str, event: str, data: Any = None) -> None:
-        """Fire-and-forget an event into ``bucket`` under ``event``."""
-        payload = _dumps(data)
-        await self._write(f"EMIT {bucket} {event} {payload}\n")
+    async def emit(
+        self,
+        bucket: str,
+        event: str,
+        data: Any = None,
+        *,
+        sign: Optional[Ed25519Keypair] = None,
+        encrypt_to: Optional[str] = None,
+    ) -> None:
+        """Fire-and-forget an event into ``bucket`` under ``event``.
 
-    async def set(self, bucket: str, key: str, value: Any) -> None:
-        """Store ``value`` (as a raw JSON token) at ``bucket``/``key``."""
-        await self._write(f"SET {bucket} {key} {_dumps(value)}\n")
+        With ``sign``/``encrypt_to`` the payload is wrapped in an ``s1``/``e1``
+        (or sign-then-encrypt) envelope before hitting the wire; without them the
+        plain payload is byte-for-byte identical to the pre-crypto path.
+        """
+        wire = _apply_send_crypto(data, sign, encrypt_to)
+        await self._write(f"EMIT {bucket} {event} {_dumps(wire)}\n")
+
+    async def set(
+        self,
+        bucket: str,
+        key: str,
+        value: Any,
+        *,
+        sign: Optional[Ed25519Keypair] = None,
+        encrypt_to: Optional[str] = None,
+    ) -> None:
+        """Store ``value`` (as a raw JSON token) at ``bucket``/``key``.
+
+        Accepts the same ``sign``/``encrypt_to`` outbound crypto options as
+        :meth:`emit`.
+        """
+        wire = _apply_send_crypto(value, sign, encrypt_to)
+        await self._write(f"SET {bucket} {key} {_dumps(wire)}\n")
         resp = await self._read_line()
         if resp.strip() != "OK":
             raise RuntimeError(f"SET failed: {resp}")
 
-    async def get(self, bucket: str, key: str) -> Any:
-        """Read ``bucket``/``key``. Returns the parsed value, or ``None`` if unset."""
+    async def get(
+        self,
+        bucket: str,
+        key: str,
+        *,
+        verify: Optional[VerifyPredicate] = None,
+        decrypt_with: Optional[X25519Keypair] = None,
+        max_skew_seconds: float = 300,
+    ) -> Any:
+        """Read ``bucket``/``key``. Returns the parsed value, or ``None`` if unset.
+
+        With no recv crypto options this returns the bare value (back-compat).
+        With any recv option it returns a ``GetResult`` dict:
+        ``{"data", "signed_by", "encrypted", "error", "raw"}`` (fail-closed).
+        """
+        has_opts = verify is not None or decrypt_with is not None
         await self._write(f"GET {bucket} {key}\n")
         resp = await self._read_line()
         if resp == "NIL":
-            return None
-        if resp.startswith("VALUE "):
-            return json.loads(resp[6:])
-        raise RuntimeError(f"GET failed: {resp}")
+            raw: Any = None
+        elif resp.startswith("VALUE "):
+            raw = json.loads(resp[6:])
+        else:
+            raise RuntimeError(f"GET failed: {resp}")
+
+        if not has_opts:
+            return raw
+        if raw is None:
+            return {"data": None}
+        r = _resolve_recv_crypto(raw, verify, decrypt_with, max_skew_seconds, True)
+        out: dict[str, Any] = {"data": r.get("data")}
+        for f in ("signed_by", "encrypted", "error", "raw"):
+            if f in r:
+                out[f] = r[f]
+        return out
 
     async def listen(
-        self, bucket: str, event: str = "*"
+        self,
+        bucket: str,
+        event: str = "*",
+        *,
+        verify: Optional[VerifyPredicate] = None,
+        decrypt_with: Optional[X25519Keypair] = None,
+        max_skew_seconds: float = 300,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Async-iterate events. Yields ``{"bucket", "event", "data"}`` dicts."""
+        """Async-iterate events. Yields ``{"bucket", "event", "data", ...}`` dicts.
+
+        With no recv crypto options each item is ``{"bucket", "event", "data"}``
+        (back-compat). With any recv option, enveloped items are verified/
+        decrypted fail-closed and carry ``signed_by``/``encrypted``/``error``/
+        ``raw`` metadata mirroring the TS delivery shape.
+        """
+        has_opts = verify is not None or decrypt_with is not None
         sub = _ListenSub(bucket, event)
         # Connect BEFORE tracking the sub so the connect-time _resubscribe()
         # cannot also emit it (which would double-fire buffered replay).
@@ -262,18 +462,41 @@ class NBus:
                 sp2 = rest.find(" ", sp1 + 1)
                 if sp1 == -1 or sp2 == -1:
                     continue
-                yield {
-                    "bucket": rest[:sp1],
-                    "event": rest[sp1 + 1 : sp2],
-                    "data": json.loads(rest[sp2 + 1 :]),
-                }
+                ev_bucket = rest[:sp1]
+                ev_event = rest[sp1 + 1 : sp2]
+                value = json.loads(rest[sp2 + 1 :])
+
+                if not has_opts:
+                    yield {"bucket": ev_bucket, "event": ev_event, "data": value}
+                    continue
+
+                r = _resolve_recv_crypto(
+                    value, verify, decrypt_with, max_skew_seconds, True
+                )
+                item: dict[str, Any] = {"bucket": ev_bucket, "event": ev_event}
+                for f in ("data", "signed_by", "encrypted", "error", "raw"):
+                    if f in r:
+                        item[f] = r[f]
+                yield item
         finally:
             self._active_subs.discard(sub)
 
     async def watch(
-        self, bucket: str, key: str
+        self,
+        bucket: str,
+        key: str,
+        *,
+        verify: Optional[VerifyPredicate] = None,
+        decrypt_with: Optional[X25519Keypair] = None,
+        max_skew_seconds: float = 300,
     ) -> AsyncGenerator[Any, None]:
-        """Async-iterate value changes for ``bucket``/``key``. Yields parsed values."""
+        """Async-iterate value changes for ``bucket``/``key``.
+
+        With no recv crypto options yields the parsed value (back-compat). With
+        any recv option yields a ``WatchItem`` dict
+        (``{"data", "signed_by", "encrypted", "error", "raw"}``), fail-closed.
+        """
+        has_opts = verify is not None or decrypt_with is not None
         sub = _WatchSub(bucket, key)
         writer = await self._ensure_connected()
         self._active_subs.add(sub)
@@ -282,8 +505,20 @@ class NBus:
             await writer.drain()
             while not self._closed:
                 line = await self._read_line()
-                if line.startswith("VALUE "):
-                    yield json.loads(line[6:])
+                if not line.startswith("VALUE "):
+                    continue
+                value = json.loads(line[6:])
+                if not has_opts:
+                    yield value
+                    continue
+                r = _resolve_recv_crypto(
+                    value, verify, decrypt_with, max_skew_seconds, True
+                )
+                item: dict[str, Any] = {}
+                for f in ("data", "signed_by", "encrypted", "error", "raw"):
+                    if f in r:
+                        item[f] = r[f]
+                yield item
         finally:
             self._active_subs.discard(sub)
 
@@ -322,6 +557,58 @@ class NBus:
         if not resp.startswith("OK "):
             raise RuntimeError(f"BUCKETS failed: {resp}")
         return json.loads(resp[3:])
+
+    # ------------------------------------------------------------------ #
+    # Key-discovery convention (CRYPTO.md §5) — pure bus state, TOFU.
+    # ------------------------------------------------------------------ #
+
+    async def publish_keys(
+        self,
+        name: str,
+        sign: Any = None,
+        box: Any = None,
+    ) -> None:
+        """Publish a key record to ``_keys/<name>`` (``SET``). Stamps ``ts=now``.
+
+        ``sign``/``box`` accept a Keypair or a raw base64url public-key string.
+        At least one must be supplied. TOFU convention — publishing asserts
+        nothing; verify fingerprints out-of-band.
+        """
+        sign_pub = _pub_of(sign)
+        box_pub = _pub_of(box)
+        if sign_pub is None and box_pub is None:
+            raise ValueError("publish_keys: at least one of sign/box is required")
+        record: dict[str, Any] = {"ts": int(time.time())}
+        if sign_pub is not None:
+            record["sign"] = sign_pub
+        if box_pub is not None:
+            record["box"] = box_pub
+        await self.set(KEYS_BUCKET, name, record)
+
+    async def fetch_keys(self, name: str) -> Optional[dict[str, Any]]:
+        """Fetch the published key record for ``name`` (``GET _keys <name>``).
+
+        Returns ``None`` if unset; raises on a structurally malformed record
+        (corruption / hostile overwrite, not a miss). TOFU — asserts no trust.
+        """
+        raw = await self.get(KEYS_BUCKET, name)
+        if raw is None:
+            return None
+        rec = _parse_key_record(raw)
+        if rec is None:
+            raise RuntimeError(f"fetch_keys: malformed key record for {name!r}")
+        return rec
+
+    async def watch_keys(self, name: str) -> AsyncGenerator[dict[str, Any], None]:
+        """Watch ``_keys/<name>`` for rotation, yielding each valid record.
+
+        Malformed records are SKIPPED silently (surfacing them as an exception
+        would tear down the long-lived watch). TOFU — asserts no trust.
+        """
+        async for value in self.watch(KEYS_BUCKET, name):
+            rec = _parse_key_record(value)
+            if rec is not None:
+                yield rec
 
     def close(self) -> None:
         """Close the connection and release any parked readers/generators."""
