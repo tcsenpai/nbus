@@ -1,0 +1,224 @@
+[
+  {
+    "name": "_README",
+    "description": "This file is a language-agnostic conformance SPEC for the nbus line protocol. It is pure data (no code) so a runner in ANY language can execute it against a real daemon. Each object after this one is a test vector. See tests/vectors.schema.md for the full schema. Vectors use bucket names unique to each vector so that shared daemon state (buckets/keys are process-global) does not cross-contaminate. Volatile/global assertions (STATS, BUCKETS) use regex `matches` rather than exact counts.",
+    "steps": []
+  },
+
+  {
+    "name": "emit-sub-receives-event",
+    "description": "conn1 SUBs an exact event; conn0 EMITs it; conn1 receives the EVENT line",
+    "steps": [
+      { "conn": 1, "send": "SUB emitsub done" },
+      { "conn": 0, "send": "EMIT emitsub done {\"version\":\"1.2.3\"}", "expect": { "equals": "OK" } },
+      { "conn": 1, "expect": { "equals": "EVENT emitsub done {\"version\":\"1.2.3\"}" } }
+    ]
+  },
+  {
+    "name": "emit-sub-wildcard-receives-any-event",
+    "description": "A wildcard SUB (SUB b *) receives events of any event name in the bucket",
+    "steps": [
+      { "conn": 1, "send": "SUB wildsub *" },
+      { "conn": 0, "send": "EMIT wildsub alpha {\"n\":1}", "expect": { "equals": "OK" } },
+      { "conn": 1, "expect": { "equals": "EVENT wildsub alpha {\"n\":1}" } },
+      { "conn": 0, "send": "EMIT wildsub beta {\"n\":2}", "expect": { "equals": "OK" } },
+      { "conn": 1, "expect": { "equals": "EVENT wildsub beta {\"n\":2}" } }
+    ]
+  },
+  {
+    "name": "emit-sub-buffered-replay",
+    "description": "An event EMITted before any subscriber is replayed from the per-event ring buffer when a SUB arrives",
+    "steps": [
+      { "conn": 0, "send": "EMIT replaybuf tick {\"seq\":7}", "expect": { "equals": "OK" } },
+      { "conn": 1, "send": "SUB replaybuf tick" },
+      { "conn": 1, "expect": { "equals": "EVENT replaybuf tick {\"seq\":7}" } }
+    ]
+  },
+  {
+    "name": "emit-defaults-event-and-data",
+    "description": "EMIT with only a bucket defaults event to 'default' and data to null; a wildcard subscriber sees it",
+    "steps": [
+      { "conn": 1, "send": "SUB emitdefault *" },
+      { "conn": 0, "send": "EMIT emitdefault", "expect": { "equals": "OK" } },
+      { "conn": 1, "expect": { "equals": "EVENT emitdefault default null" } }
+    ]
+  },
+
+  {
+    "name": "unsub-stops-delivery",
+    "description": "After UNSUB, a subsequent EMIT is NOT delivered to the (former) subscriber; asserted as silence within the drain window",
+    "steps": [
+      { "conn": 1, "send": "SUB unsubtest done" },
+      { "conn": 1, "send": "UNSUB unsubtest done", "expect": { "equals": "OK" } },
+      { "conn": 0, "send": "EMIT unsubtest done {\"after\":\"unsub\"}", "expect": { "equals": "OK" } },
+      { "conn": 1, "expect": { "silent": true } }
+    ]
+  },
+
+  {
+    "name": "set-get-string-roundtrip",
+    "description": "SET stores a JSON string token verbatim; GET returns it so JSON.parse recovers the string",
+    "steps": [
+      { "send": "SET setstr k \"1.2.3\"", "expect": { "equals": "OK" } },
+      { "send": "GET setstr k", "expect": { "equals": "VALUE \"1.2.3\"" } }
+    ]
+  },
+  {
+    "name": "set-get-number-roundtrip",
+    "description": "SET stores a JSON number token verbatim; GET returns it",
+    "steps": [
+      { "send": "SET setnum k 42", "expect": { "equals": "OK" } },
+      { "send": "GET setnum k", "expect": { "equals": "VALUE 42" } }
+    ]
+  },
+  {
+    "name": "set-get-boolean-roundtrip",
+    "description": "SET stores a JSON boolean token verbatim; GET returns it",
+    "steps": [
+      { "send": "SET setbool k true", "expect": { "equals": "OK" } },
+      { "send": "GET setbool k", "expect": { "equals": "VALUE true" } }
+    ]
+  },
+  {
+    "name": "set-get-null-roundtrip",
+    "description": "SET stores the JSON null token verbatim; GET returns it (distinct from NIL, which means key-unset)",
+    "steps": [
+      { "send": "SET setnull k null", "expect": { "equals": "OK" } },
+      { "send": "GET setnull k", "expect": { "equals": "VALUE null" } }
+    ]
+  },
+  {
+    "name": "set-get-object-roundtrip",
+    "description": "SET stores a JSON object token verbatim; GET returns it so JSON.parse recovers it",
+    "steps": [
+      { "send": "SET setobj cfg {\"x\":1,\"y\":[true,null]}", "expect": { "equals": "OK" } },
+      { "send": "GET setobj cfg", "expect": { "equals": "VALUE {\"x\":1,\"y\":[true,null]}" } }
+    ]
+  },
+  {
+    "name": "set-get-array-roundtrip",
+    "description": "SET stores a JSON array token verbatim; GET returns it",
+    "steps": [
+      { "send": "SET setarr k [1,2,3]", "expect": { "equals": "OK" } },
+      { "send": "GET setarr k", "expect": { "equals": "VALUE [1,2,3]" } }
+    ]
+  },
+  {
+    "name": "get-unset-key-returns-nil",
+    "description": "GET on a key that was never SET returns NIL",
+    "steps": [
+      { "send": "GET getnil missing", "expect": { "equals": "NIL" } }
+    ]
+  },
+  {
+    "name": "set-replies-ok",
+    "description": "SET replies OK on success",
+    "steps": [
+      { "send": "SET setok k \"v\"", "expect": { "equals": "OK" } }
+    ]
+  },
+
+  {
+    "name": "watch-fires-current-then-on-set",
+    "description": "WATCH fires immediately with the current value, then again on every SET",
+    "steps": [
+      { "conn": 0, "send": "SET watchcur k \"initial\"", "expect": { "equals": "OK" } },
+      { "conn": 1, "send": "WATCH watchcur k" },
+      { "conn": 1, "expect": { "equals": "VALUE \"initial\"" } },
+      { "conn": 0, "send": "SET watchcur k \"updated\"", "expect": { "equals": "OK" } },
+      { "conn": 1, "expect": { "equals": "VALUE \"updated\"" } }
+    ]
+  },
+  {
+    "name": "watch-unset-key-no-immediate-then-fires-on-set",
+    "description": "WATCH on an unset key emits no immediate value; the first VALUE arrives on the first SET",
+    "steps": [
+      { "conn": 1, "send": "WATCH watchunset k" },
+      { "conn": 1, "expect": { "silent": true } },
+      { "conn": 0, "send": "SET watchunset k {\"ready\":true}", "expect": { "equals": "OK" } },
+      { "conn": 1, "expect": { "equals": "VALUE {\"ready\":true}" } }
+    ]
+  },
+  {
+    "name": "unwatch-stops-delivery",
+    "description": "After UNWATCH, a subsequent SET does NOT deliver a VALUE to the (former) watcher",
+    "steps": [
+      { "conn": 0, "send": "SET unwatchtest k \"v0\"", "expect": { "equals": "OK" } },
+      { "conn": 1, "send": "WATCH unwatchtest k" },
+      { "conn": 1, "expect": { "equals": "VALUE \"v0\"" } },
+      { "conn": 1, "send": "UNWATCH unwatchtest k", "expect": { "equals": "OK" } },
+      { "conn": 0, "send": "SET unwatchtest k \"v1\"", "expect": { "equals": "OK" } },
+      { "conn": 1, "expect": { "silent": true } }
+    ]
+  },
+
+  {
+    "name": "ping-pong",
+    "description": "PING replies PONG",
+    "steps": [
+      { "send": "PING", "expect": { "equals": "PONG" } }
+    ]
+  },
+
+  {
+    "name": "stats-returns-json-object",
+    "description": "STATS returns OK followed by a JSON object containing buckets/subscriptions/keys/uptime_seconds; counts are process-global so matched by regex",
+    "steps": [
+      { "send": "STATS", "expect": { "matches": "^OK \\{.*\"buckets\":\\d+.*\"subscriptions\":\\d+.*\"keys\":\\d+.*\"uptime_seconds\":\\d+.*\\}$" } }
+    ]
+  },
+
+  {
+    "name": "buckets-returns-json-array",
+    "description": "BUCKETS returns OK followed by a JSON array of bucket-name strings",
+    "steps": [
+      { "send": "SET bucketslist k \"v\"", "expect": { "equals": "OK" } },
+      { "send": "BUCKETS", "expect": { "matches": "^OK \\[.*\\]$" } }
+    ]
+  },
+
+  {
+    "name": "error-unknown-command",
+    "description": "An unrecognized command replies ERROR unknown command",
+    "steps": [
+      { "send": "FLOOP a b", "expect": { "equals": "ERROR unknown command" } }
+    ]
+  },
+  {
+    "name": "error-missing-key-on-set",
+    "description": "SET with a bucket but no key replies ERROR missing bucket or key",
+    "steps": [
+      { "send": "SET errset", "expect": { "equals": "ERROR missing bucket or key" } }
+    ]
+  },
+  {
+    "name": "error-missing-bucket-on-emit",
+    "description": "EMIT with no bucket replies ERROR missing bucket",
+    "steps": [
+      { "send": "EMIT", "expect": { "equals": "ERROR missing bucket" } }
+    ]
+  },
+  {
+    "name": "error-missing-bucket-on-get",
+    "description": "GET with a bucket but no key replies ERROR missing bucket or key",
+    "steps": [
+      { "send": "GET errget", "expect": { "equals": "ERROR missing bucket or key" } }
+    ]
+  },
+  {
+    "name": "error-oversized-payload",
+    "description": "A SET whose value exceeds max_payload_bytes (default 262144) replies ERROR payload too large. The value below is a JSON string of 300000 filler characters (well over the default limit) so the vector needs no special config.",
+    "steps": [
+      { "send_repeat": { "prefix": "SET oversized k \"", "fill": "a", "count": 300000, "suffix": "\"" }, "expect": { "matches": "^ERROR .*payload too large.*$" } }
+    ]
+  },
+
+  {
+    "name": "framing-escaped-newline-roundtrips",
+    "description": "A SET whose JSON string value contains an escaped newline (the two characters backslash-n) round-trips intact, proving escaped newlines are transport-safe. A LITERAL newline is not representable in one line (that is the framing rule), so it is intentionally not a vector.",
+    "steps": [
+      { "send": "SET framing k \"a\\nb\"", "expect": { "equals": "OK" } },
+      { "send": "GET framing k", "expect": { "equals": "VALUE \"a\\nb\"" } }
+    ]
+  }
+]
