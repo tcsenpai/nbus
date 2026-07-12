@@ -14,8 +14,6 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type SlowClientPolicy = "drop" | "block";
-
 export interface ServerConfig {
   socket_path: string;
   http_port: number;
@@ -33,8 +31,11 @@ export interface LimitsConfig {
 
 export interface BehaviorConfig {
   watch_on_equal: boolean;
-  slow_client_policy: SlowClientPolicy;
 }
+
+// ponytail: broadcast fan-out always drops on a failed/slow write — a bus that
+// blocks on one slow subscriber would stall every other client (self-DoS). No
+// slow_client_policy knob; drop is the only sane broadcast behavior.
 
 export interface Config {
   server: ServerConfig;
@@ -67,7 +68,6 @@ function defaultConfig(): Config {
     },
     behavior: {
       watch_on_equal: true,
-      slow_client_policy: "drop",
     },
   };
 }
@@ -189,14 +189,6 @@ function getBoolean(
   return typeof v === "boolean" ? v : fallback;
 }
 
-function getSlowClientPolicy(
-  section: Record<string, TomlValue> | undefined,
-  fallback: SlowClientPolicy,
-): SlowClientPolicy {
-  const v = section?.slow_client_policy;
-  return v === "drop" || v === "block" ? v : fallback;
-}
-
 /** Apply an env-var integer override if present and valid. */
 function envInt(name: string, current: number): number {
   const raw = process.env[name];
@@ -253,10 +245,6 @@ export function loadConfig(): Config {
       "watch_on_equal",
       config.behavior.watch_on_equal,
     );
-    config.behavior.slow_client_policy = getSlowClientPolicy(
-      behavior,
-      config.behavior.slow_client_policy,
-    );
   }
 
   // Env overrides (applied after TOML, per field).
@@ -292,7 +280,6 @@ if (import.meta.main) {
   assert.equal(cfg.limits.buffer_size, 64);
   assert.equal(cfg.limits.bucket_ttl_seconds, 300);
   assert.equal(cfg.behavior.watch_on_equal, true);
-  assert.equal(cfg.behavior.slow_client_policy, "drop");
 
   // Parser exercises: valid subset round-trips to expected types.
   const sample = [
@@ -301,13 +288,11 @@ if (import.meta.main) {
     "http_port = 8080",
     "[behavior]",
     "watch_on_equal = false",
-    'slow_client_policy = "block"',
   ].join("\n");
   const doc = parseFlatToml(sample);
   assert.equal(doc.server?.socket_path, "/tmp/x.sock");
   assert.equal(doc.server?.http_port, 8080);
   assert.equal(doc.behavior?.watch_on_equal, false);
-  assert.equal(doc.behavior?.slow_client_policy, "block");
 
   // Malformed input throws.
   assert.throws(() => parseFlatToml("key = 1"), /outside any \[section\]/);

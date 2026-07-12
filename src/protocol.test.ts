@@ -127,7 +127,7 @@ test("oversized payload → ERROR (BusError translated)", () => {
       buffer_size: 64,
       bucket_ttl_seconds: 300,
     },
-    behavior: { watch_on_equal: true, slow_client_policy: "drop" },
+    behavior: { watch_on_equal: true },
   });
   const { client } = makeClient();
   const big = JSON.stringify("way too long to fit in eight bytes");

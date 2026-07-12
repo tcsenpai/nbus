@@ -19,7 +19,6 @@ function makeConfig(overrides: {
     },
     behavior: {
       watch_on_equal: overrides.watch_on_equal ?? true,
-      slow_client_policy: "drop",
     },
   };
 }

@@ -352,8 +352,9 @@ subscribe filter.
 
 - One EMIT fans out to all current subscribers of that bucket/event
 - Wildcard `*` subscribers receive all events in the bucket
-- No delivery guarantees — a failed socket write is swallowed
-  (`slow_client_policy`, default `drop`)
+- No delivery guarantees — a failed or slow socket write is swallowed and that
+  message is dropped for that client. This is deliberate: a broadcast bus that
+  blocked on one slow subscriber would stall every other client
 
 ### 7.3 State
 
@@ -392,7 +393,6 @@ bucket_ttl_seconds = 300
 
 [behavior]
 watch_on_equal = true         # fire WATCH even if value unchanged
-slow_client_policy = "drop"   # "drop" or "block"
 ```
 
 > **TOML subset:** the daemon ships a minimal built-in parser that supports only
