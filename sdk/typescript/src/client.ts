@@ -496,9 +496,13 @@ export class NBus {
     opts?: RecvCryptoOptions,
   ): AsyncGenerator<ListenItem<T>> {
     const sub: ListenSub = { kind: "listen", bucket, event };
+    // Connect BEFORE tracking the sub: first-connect resubscribe() iterates
+    // activeSubs, so tracking first would make it re-send this SUB — then the
+    // explicit write below duplicates it (double buffered replay). Reconnect
+    // still covers this sub, which is tracked by the time a reconnect fires.
+    const sock = await this.ensureConnected();
     this.activeSubs.add(sub);
     try {
-      const sock = await this.ensureConnected();
       sock.write(`SUB ${bucket} ${event}\n`);
 
       while (!this.closed) {
@@ -546,9 +550,11 @@ export class NBus {
     opts?: RecvCryptoOptions,
   ): AsyncGenerator<T | WatchItem<T>> {
     const sub: WatchSub = { kind: "watch", bucket, key };
+    // Connect BEFORE tracking (see listen() — avoids double-subscribe when
+    // first-connect resubscribe() re-sends a just-tracked sub).
+    const sock = await this.ensureConnected();
     this.activeSubs.add(sub);
     try {
-      const sock = await this.ensureConnected();
       sock.write(`WATCH ${bucket} ${key}\n`);
 
       while (!this.closed) {
