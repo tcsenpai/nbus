@@ -5,16 +5,34 @@ build-backend = "hatchling.build"
 [project]
 name = "nbus-client"
 version = "0.1.0"
-description = "Async Python client for the nbus local IPC bus daemon"
+description = "Async Python client for the nbus local IPC bus, with an optional end-to-end crypto envelope layer (ed25519 + X25519/AES-GCM)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "nbus" }]
-# Core has NO runtime dependencies (stdlib asyncio + json only).
-# Crypto dependency is added in task #16.
+authors = [{ name = "tcsenpai" }]
+keywords = ["nbus", "ipc", "pubsub", "bus", "unix-socket", "asyncio", "ed25519", "x25519", "crypto"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Framework :: AsyncIO",
+    "Topic :: System :: Networking",
+    "Topic :: Software Development :: Libraries",
+]
+# ed25519 / X25519 / AES-256-GCM for the optional crypto envelope layer.
 dependencies = [
     "cryptography>=49.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/tcsenpai/nbus"
+Repository = "https://github.com/tcsenpai/nbus"
+Documentation = "https://github.com/tcsenpai/nbus/wiki"
+Issues = "https://github.com/tcsenpai/nbus/issues"
 
 [project.optional-dependencies]
 dev = [

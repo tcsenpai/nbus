@@ -38,6 +38,9 @@
     "src",
     "README.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "sideEffects": false,
   "engines": {
     "bun": ">=1.0.0"

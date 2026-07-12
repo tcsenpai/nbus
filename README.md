@@ -51,7 +51,26 @@ curl http://127.0.0.1:7600/stats
 curl http://127.0.0.1:7600/buckets
 ```
 
+## SDKs
+
+nbus ships two official client SDKs. Both wrap the wire protocol (auto-reconnect,
+re-subscribe, keepalive) and expose the optional end-to-end crypto layer. They
+pass the same shared conformance vectors (`tests/vectors.json` for the wire,
+`tests/crypto-vectors.json` for crypto), so they interoperate across languages.
+
+| SDK | Package | Path | Notes |
+|-----|---------|------|-------|
+| **TypeScript** | `@nbus/client` | [`sdk/typescript/`](sdk/typescript/README.md) | zero runtime deps (`node:crypto`) |
+| **Python** | `nbus-client` | [`sdk/python/`](sdk/python/README.md) | `asyncio` + `cryptography`, py3.11+ |
+
+Building for another language? The protocol is text-based and language-agnostic —
+see the [SDK Guide](https://github.com/tcsenpai/nbus/wiki/SDK-Guide); the two SDKs
+above are its reference implementations.
+
 ## SDK Usage
+
+The TypeScript SDK (see [`sdk/typescript/`](sdk/typescript/README.md) for the
+published `@nbus/client` package):
 
 ```typescript
 import { NBus } from "./src/client";
