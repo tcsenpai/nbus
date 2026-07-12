@@ -1,8 +1,10 @@
-# nbus — Crypto Envelope Specification (v0.1-draft)
+# nbus — Crypto Envelope Specification (v0.1)
 
-> **Status: DRAFT for review — not yet implemented.** This document defines an
+> **Status: FROZEN — implementation in progress.** This document defines an
 > OPTIONAL, protocol-level envelope for signed and/or encrypted nbus payloads.
-> It is a design surface: annotate inline, then it drives the SDK implementation.
+> Enveloping is always a client choice, per message; a daemon and a plain client
+> that never opt in are completely unaffected. The open questions in §8 are
+> resolved (see §8 for the decisions).
 
 ---
 
@@ -110,22 +112,26 @@ of an **`e1`** envelope. Recipients decrypt `e1`, then verify the inner `s1`.
 Rationale for sign-then-encrypt: the signature is not exposed to non-recipients,
 and the verified identity is bound to the confidential content.
 
-### 3.4 Canonical JSON
+### 3.4 Canonical JSON — RFC 8785 (JCS)
 
-To make signatures reproducible across languages, the signed/encrypted bytes use
-a canonical serialization:
+To make signatures reproducible across languages, hashed/encrypted JSON uses
+**RFC 8785 JSON Canonicalization Scheme (JCS)**:
 
 - UTF-8, no insignificant whitespace (compact, matching the single-line
   [framing rule](PROTOCOL.md)).
-- Object keys sorted lexicographically by UTF-16 code unit **except** the
-  fixed-order envelope frame keys in §3.1 (which are emitted in the stated
-  order). The **`payload`** value and any nested objects use sorted keys.
-- Numbers: no leading `+`, no trailing zeros beyond what round-trips; integers
-  where possible. (SDKs SHOULD avoid non-integer floats in signed payloads to
-  dodge cross-language float formatting drift — document this caveat.)
+- Object keys sorted by UTF-16 code unit.
+- Numbers serialized per JCS (ECMAScript `Number` canonical form).
+
+The **envelope frame** (§3.1 keys `$nbus`, `alg`, `pub`, `ts`, `payload`) is
+emitted in the stated fixed order for the signing input; the `payload` value and
+any nested objects are JCS-serialized. Integers are strongly preferred in signed
+payloads for readability, but JCS pins float formatting so non-integers also
+interoperate.
 
 > Canonicalization is the fiddliest cross-language part. The conformance vectors
-> (§7) pin exact bytes so every SDK agrees.
+> (§7) pin exact bytes so every SDK agrees. Using standard JCS means any
+> language's off-the-shelf JCS library produces identical bytes to our
+> zero-dependency implementation.
 
 ---
 
@@ -214,14 +220,27 @@ SDK prove interop without a live peer.
 
 ---
 
-## 8. Open questions (for annotation)
+## 8. Resolved decisions
 
-1. Clock-skew default for `ts` rejection — ±300s? Configurable per-listen?
-2. Should `verify` receive the whole envelope (incl `ts`) or just `pub`?
-3. Canonical JSON: adopt an existing standard (JCS / RFC 8785) instead of a
-   bespoke rule? JCS is well-specified and has cross-language libs — but pulling
-   one in touches the zero-dep rule (could implement the JCS subset ourselves).
-4. Do we need `set`/`get` state signing to also carry `ts` for freshness, or is
-   last-writer-wins enough there?
-5. Key discovery `_keys` bucket — reserve it in the daemon (reject plain writes?)
-   or keep it pure convention? (Reserving = daemon logic, violates §1 principle 1.)
+1. **Clock skew:** verifiers reject `s1` envelopes whose `ts` is outside **±300s**
+   by default. Configurable per-listen/-verify call (`maxSkewSeconds`, `0` or
+   `Infinity` = disable the check). Signing always stamps `ts`.
+2. **`verify` predicate signature:** receives **`(pub, envelope)`** — the pubkey
+   plus the full parsed envelope (so a caller can inspect `ts`, `alg`, etc.).
+   Returning a falsy value rejects the message (fail closed).
+3. **Canonical JSON = RFC 8785 (JCS).** We implement the JCS subset ourselves
+   (zero new dependency) but conform to the standard so any language's JCS lib
+   interoperates: UTF-8, no insignificant whitespace, object keys sorted by
+   UTF-16 code unit, JSON-number canonical form per ECMAScript `Number.prototype.toString`.
+   This **replaces** the bespoke rule sketched in §3.4 — §3.4's fixed-order frame
+   keys still apply to the outer envelope frame, but every hashed/encrypted JSON
+   value (the `payload`, nested objects) is JCS-serialized. Integers strongly
+   preferred in signed payloads; JCS pins float formatting so non-integers are
+   also interoperable, just discouraged for readability.
+4. **State signing carries `ts`.** `set`/`get`/`watch` use the same `s1`/`e1`
+   envelopes as events, `ts` included, so state values get the same freshness /
+   tamper-evidence guarantees. Last-writer-wins still governs storage; `ts` is
+   advisory to the reader.
+5. **`_keys` is pure convention.** The daemon does NOT reserve or special-case
+   it (principle §1.1 — dumb daemon wins). Anyone can write `_keys`; it is TOFU,
+   nothing more. SDK helpers use it but assert no trust.
