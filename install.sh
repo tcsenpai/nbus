@@ -210,6 +210,18 @@ main() {
   cp "${TMP}/${CLI_ASSET}"    "${DEST}/nbus"
   chmod +x "${DEST}/nbusd" "${DEST}/nbus"
 
+  # Best-effort: the service installer (systemd/launchd). Optional — older
+  # releases may not ship it, so a missing asset is not fatal. When present it
+  # is verified against SHA256SUMS like everything else before install.
+  if fetch "${BASE}/nbus-service" "${TMP}/nbus-service" 2>/dev/null; then
+    verify_file "${TMP}/SHA256SUMS" "${TMP}/nbus-service" "nbus-service"
+    cp "${TMP}/nbus-service" "${DEST}/nbus-service"
+    chmod +x "${DEST}/nbus-service"
+    HAVE_SERVICE=1
+  else
+    HAVE_SERVICE=0
+  fi
+
   warn_if_not_on_path "$DEST"
 
   # 7. summary + next steps.
@@ -217,11 +229,17 @@ main() {
   info "nbus ${TAG} installed:"
   info "  ${DEST}/nbusd  (daemon)"
   info "  ${DEST}/nbus   (client)"
+  [ "$HAVE_SERVICE" = 1 ] && info "  ${DEST}/nbus-service   (service installer)"
   info ""
   info "next steps:"
   info "  1. start the daemon:   nbusd &"
   info "  2. try the client:     nbus --help"
-  info "  3. run as a service:   see the docs for launchd/systemd unit install"
+  if [ "$HAVE_SERVICE" = 1 ]; then
+    info "  3. run as a service:   nbus-service install (systemd/launchd)"
+  else
+    info "  3. run as a service:   see the wiki (systemd/launchd)"
+  fi
+  info "     https://github.com/tcsenpai/nbus/wiki/Installation#running-as-a-service"
 }
 
 main "$@"

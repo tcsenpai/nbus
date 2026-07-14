@@ -46,38 +46,18 @@ nbus-<os>-<arch>.tar.gz   # contains unsuffixed `nbusd` and `nbus`
 
 `bin.install "nbusd", "nbus"` then unpacks both from one download.
 
-### Build/CI dependency (must be wired)
+### Build/CI dependency (wired)
 
-`scripts/build.sh` currently emits **bare** binaries:
-
-```
-nbusd-<os>-<arch>   nbus-<os>-<arch>   SHA256SUMS
-```
-
-For this formula to resolve, the build + release pipeline must **additionally**
-produce, per target, a tarball whose members are the *unsuffixed* names:
+`scripts/build.sh` produces, per target, both the bare binaries and a tarball
+whose members are the *unsuffixed* names, and checksums all of them:
 
 ```
-nbus-<os>-<arch>.tar.gz  ->  nbusd, nbus
+nbusd-<os>-<arch>   nbus-<os>-<arch>   nbus-<os>-<arch>.tar.gz -> {nbusd, nbus}   SHA256SUMS
 ```
 
-and include those tarballs in `SHA256SUMS`. Sketch for `build.sh` (after the
-per-target build loop, inside `dist/`):
-
-```sh
-for suffix in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
-  # stage unsuffixed names so the tarball unpacks to bin/nbusd, bin/nbus
-  cp "nbusd-$suffix" nbusd
-  cp "nbus-$suffix"  nbus
-  tar -czf "nbus-$suffix.tar.gz" nbusd nbus
-  rm -f nbusd nbus
-done
-# then checksum the tarballs too:
-shasum -a 256 nbus-*.tar.gz >> SHA256SUMS   # sha256sum on Linux
-```
-
-The release workflow (`release.yml`) must upload these `*.tar.gz` assets
-alongside the bare binaries. Flagged as an external dependency — not wired here.
+The release workflow (`release.yml`) uploads every `dist/nbus-*` asset — which
+includes the `*.tar.gz` tarballs this formula downloads — alongside the bare
+binaries. No further wiring needed; the formula resolves against the tarballs.
 
 ## Bumping version + checksums on each release
 

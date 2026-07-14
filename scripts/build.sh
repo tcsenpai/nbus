@@ -86,8 +86,12 @@ for entry in "${TARGETS[@]}"; do
   rm -rf "$stage"
 done
 
-# Checksums over every artifact — bare binaries (nbusd-*, nbus-*-<arch>) and
-# tarballs (nbus-*.tar.gz) are all matched by the two globs.
+# Ship the service installer alongside the binaries so `install.sh` can drop it
+# in too (it's self-contained — embedded unit/plist, no sibling deps).
+cp packaging/nbus-service "$OUT_DIR/nbus-service"
+
+# Checksums over every artifact. The `nbus-*` glob already covers the CLI
+# binaries, the tarballs (nbus-*.tar.gz), AND nbus-service — so only two globs.
 # (portable: shasum on macOS, sha256sum on Linux).
 echo "generating SHA256SUMS"
 cd "$OUT_DIR"

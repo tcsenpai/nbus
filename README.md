@@ -5,7 +5,53 @@
 Any app, any language. One HTTP call to emit, one connection to subscribe.
 Local-only, in-memory, no auth — v0.1.
 
+## Install
+
+`nbusd` (daemon) + `nbus` (client) ship as standalone compiled binaries for
+macOS and Linux (arm64/x64). The binaries have no runtime dependency — Bun is
+only needed to build from source, not to run them. In order of convenience:
+
+**curl | sh** — downloads the release binaries, verifies SHA256, installs to
+`/usr/local/bin` (or `~/.local/bin` if that's not writable):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tcsenpai/nbus/main/install.sh | sh
+```
+
+Env knobs: `NBUS_VERSION=vX.Y.Z` to pin a tag, `PREFIX=/custom/bin` to choose the install dir.
+
+**Homebrew**:
+
+```bash
+brew tap tcsenpai/nbus && brew install nbus
+```
+
+**Prebuilt binaries** — grab them from [GitHub Releases](https://github.com/tcsenpai/nbus/releases),
+verify against `SHA256SUMS`, then install:
+
+```bash
+# after downloading nbusd-<os>-<arch>, nbus-<os>-<arch>, SHA256SUMS
+shasum -a 256 -c SHA256SUMS --ignore-missing   # sha256sum -c on Linux
+chmod +x nbusd-* nbus-*
+mv nbusd-<os>-<arch> /usr/local/bin/nbusd
+mv nbus-<os>-<arch>  /usr/local/bin/nbus
+```
+
+**From source (Bun)** — see [Quick Start](#quick-start) below to run with `bun run`,
+or compile a local binary with `scripts/build.sh host`.
+
+**Run as a service** — install `nbusd` as a per-user background service
+(systemd `--user` on Linux, launchd on macOS, no sudo):
+
+```bash
+nbus-service install    # then: start | stop | restart | status | uninstall
+```
+
+Full detail: [Installation wiki](https://github.com/tcsenpai/nbus/wiki/Installation).
+
 ## Quick Start
+
+Run straight from source with Bun (dev / from-source path):
 
 ```bash
 # Install deps (first run only)
@@ -18,6 +64,8 @@ bun run src/daemon.ts
 bun run src/cli.ts emit deploy done --data '{"version":"1.2.3"}'
 bun run src/cli.ts listen deploy done
 ```
+
+With the installed binaries the same is `nbusd` and `nbus emit ...` / `nbus listen ...`.
 
 ## Primitives
 
@@ -165,4 +213,3 @@ Suites: `bus.test.ts`, `src/protocol.test.ts`, `client.test.ts`.
 - No persistence — everything is lost on restart
 - Idle buckets (no subscribers, no keys) auto-expire after 300s
 - Local-only, no authentication (v0.1)
-```
