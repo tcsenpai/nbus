@@ -1,6 +1,6 @@
 {
   "name": "@nbus/client",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript client SDK for nbus — local IPC bus (pub/sub + shared state) with an optional end-to-end crypto layer. Zero runtime dependencies.",
   "type": "module",
   "license": "MIT",
