@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  nbusd launchd LaunchAgent template (per-user, no root).
+  NOTE: the canonical copy used at runtime is embedded in packaging/nbus-service (kept in sync); this file is reference / manual-install only.
+
+  __NBUSD_BIN__ and __HOME__ are placeholders substituted at install time
+  (the `nbus-service` helper does this: __NBUSD_BIN__ <- `command -v nbusd`,
+  __HOME__ <- $HOME). Installed to:
+      ~/Library/LaunchAgents/com.nbus.nbusd.plist
+  load:   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nbus.nbusd.plist
+  unload: launchctl bootout   gui/$(id -u)/com.nbus.nbusd
+  logs:   ~/Library/Logs/nbusd.out.log , ~/Library/Logs/nbusd.err.log
+
+  Env overrides (NBUS_SOCKET / NBUS_HTTP_PORT / NBUS_TCP_PORT) can be added
+  under EnvironmentVariables below; config.toml is honored regardless.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nbus.nbusd</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__NBUSD_BIN__</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart only if nbusd exits non-zero; a clean SIGTERM shutdown stays down. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- Uncomment to override config via env:
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NBUS_HTTP_PORT</key>
+        <string>7600</string>
+    </dict>
+    -->
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/nbusd.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/nbusd.err.log</string>
+</dict>
+</plist>

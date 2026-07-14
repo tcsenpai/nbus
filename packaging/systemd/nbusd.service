@@ -1,0 +1,51 @@
+# nbusd systemd unit template.
+# NOTE: the canonical copy used at runtime is embedded in packaging/nbus-service (kept in sync); this file is reference / manual-install only.
+#
+# nbusd is a local-only IPC bus daemon. Its default socket lives in /tmp and
+# its HTTP listener binds 127.0.0.1, so NO root is required. Prefer a USER
+# service:
+#
+#   install (recommended, no sudo):
+#     mkdir -p ~/.config/systemd/user
+#     sed 's#__NBUSD_BIN__#'"$(command -v nbusd)"'#' \
+#       packaging/systemd/nbusd.service > ~/.config/systemd/user/nbusd.service
+#     systemctl --user daemon-reload
+#     systemctl --user enable --now nbusd
+#   logs:   journalctl --user -u nbusd -f
+#
+#   (the `nbus-service` helper does all of the above for you.)
+#
+# SYSTEM service (boot-time / multi-user, needs root): copy to
+#   /etc/systemd/system/nbusd.service, change WantedBy to multi-user.target,
+#   add `User=` / `Group=` lines, and pick a socket path outside /tmp that the
+#   service user owns (e.g. NBUS_SOCKET=/run/nbus/nbus.sock via RuntimeDirectory).
+#   Then: `sudo systemctl enable --now nbusd`. Not required for normal use.
+
+[Unit]
+Description=nbus local IPC bus daemon (nbusd)
+Documentation=https://github.com/tcsenpai/nbus
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=__NBUSD_BIN__
+Restart=on-failure
+RestartSec=2
+
+# Optional per-user environment overrides: NBUS_SOCKET, NBUS_HTTP_PORT,
+# NBUS_TCP_PORT (see also ~/.config/nbus/config.toml). The file is optional;
+# the leading '-' means systemd ignores it when absent.
+EnvironmentFile=-%h/.config/nbus/nbusd.env
+
+# Example inline overrides (uncomment instead of / in addition to the file):
+# Environment=NBUS_HTTP_PORT=7600
+# Environment=NBUS_SOCKET=%t/nbus/nbus.sock
+
+# nbusd handles SIGTERM for a graceful shutdown (unlinks its socket).
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+# default.target is the correct target for `systemctl --user`.
+# For a system-level install, change this to multi-user.target.
+WantedBy=default.target

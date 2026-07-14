@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test-ts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Typecheck
+        run: bun x tsc --noEmit
+
+      - name: Test
+        run: bun test
+
+  test-python:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The Python conformance tests spawn the Bun daemon subprocess,
+      # so bun must be on PATH in this job too.
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install root dependencies
+        run: bun install
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Sync Python deps
+        working-directory: sdk/python
+        run: uv sync --extra dev
+
+      - name: Run pytest
+        working-directory: sdk/python
+        run: uv run pytest

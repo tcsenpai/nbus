@@ -1,0 +1,252 @@
+#!/bin/sh
+# nbus-service - install/manage nbusd as a per-user background service.
+#
+# Cross-platform wrapper over systemd (Linux, --user) and launchd (macOS,
+# LaunchAgent). Per-user by design: nbusd is local-only (socket in /tmp, HTTP
+# on 127.0.0.1), so NO sudo is required.
+#
+# Usage: nbus-service install|uninstall|start|stop|restart|status
+#
+# System-level (boot-time / multi-user) installs need root and are NOT handled
+# here on purpose; see packaging/systemd/nbusd.service for how to do that.
+#
+# SELF-CONTAINED: the systemd unit and launchd plist are embedded below as
+# heredocs (emit_systemd_unit / emit_launchd_plist), so this script works when
+# copied anywhere (install.sh bin dir, /usr/local/bin, brew Cellar) with NO
+# sibling template files required at runtime. The standalone templates in
+# packaging/systemd/ and packaging/launchd/ are kept in sync for reference /
+# manual install only.
+#
+# launchctl verb choice: the modern `bootstrap gui/<uid>` / `bootout` +
+# `kickstart` / `print` interface is used (macOS 10.11+); the legacy
+# `load -w` / `unload` interface is deprecated. Both were considered; bootstrap
+# gives clearer per-domain errors and is the current supported path.
+
+set -eu
+
+LABEL="com.nbus.nbusd"
+
+SYSTEMD_UNIT_DST="$HOME/.config/systemd/user/nbusd.service"
+LAUNCHD_PLIST_DST="$HOME/Library/LaunchAgents/$LABEL.plist"
+
+# ── helpers ──────────────────────────────────────────────────────────
+err()  { printf '%s\n' "nbus-service: $*" >&2; }
+die()  { err "$*"; exit 1; }
+info() { printf '%s\n' "$*"; }
+
+os() { uname -s; }
+
+# Resolve the installed nbusd binary or fail with actionable guidance.
+find_nbusd() {
+    _bin=$(command -v nbusd 2>/dev/null || true)
+    if [ -z "$_bin" ]; then
+        die "nbusd not found in PATH. Install the binary first (e.g. ./install.sh) then re-run."
+    fi
+    printf '%s\n' "$_bin"
+}
+
+# ── embedded unit / plist (kept in sync with packaging/{systemd,launchd}) ──
+# emit_systemd_unit <nbusd_bin>: write the systemd user unit to stdout with the
+# binary path already interpolated (no external file, no sed-on-file needed).
+emit_systemd_unit() {
+    cat <<EOF
+[Unit]
+Description=nbus local IPC bus daemon (nbusd)
+Documentation=https://github.com/tcsenpai/nbus
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$1
+Restart=on-failure
+RestartSec=2
+
+# Optional per-user environment overrides: NBUS_SOCKET, NBUS_HTTP_PORT,
+# NBUS_TCP_PORT (see also ~/.config/nbus/config.toml). The file is optional;
+# the leading '-' means systemd ignores it when absent.
+EnvironmentFile=-%h/.config/nbus/nbusd.env
+
+# Example inline overrides (uncomment instead of / in addition to the file):
+# Environment=NBUS_HTTP_PORT=7600
+# Environment=NBUS_SOCKET=%t/nbus/nbus.sock
+
+# nbusd handles SIGTERM for a graceful shutdown (unlinks its socket).
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+# default.target is the correct target for \`systemctl --user\`.
+# For a system-level install, change this to multi-user.target.
+WantedBy=default.target
+EOF
+}
+
+# emit_launchd_plist <nbusd_bin> <home>: write the LaunchAgent plist to stdout
+# with the binary path and HOME already interpolated.
+emit_launchd_plist() {
+    cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nbus.nbusd</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>$1</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart only if nbusd exits non-zero; a clean SIGTERM shutdown stays down. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- Uncomment to override config via env:
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NBUS_HTTP_PORT</key>
+        <string>7600</string>
+    </dict>
+    -->
+
+    <key>StandardOutPath</key>
+    <string>$2/Library/Logs/nbusd.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>$2/Library/Logs/nbusd.err.log</string>
+</dict>
+</plist>
+EOF
+}
+
+usage() {
+    cat >&2 <<EOF
+Usage: nbus-service <command>
+
+Commands:
+  install     install + enable + start the per-user nbusd service
+  uninstall   stop + disable + remove the service
+  start       start the service
+  stop        stop the service
+  restart     restart the service
+  status      show service status
+EOF
+    exit 2
+}
+
+# ── Linux / systemd ──────────────────────────────────────────────────
+have_systemd() { command -v systemctl >/dev/null 2>&1; }
+
+linux_require_systemd() {
+    have_systemd || die "systemctl not found. This helper needs systemd (user session). \
+Run nbusd manually or write an init script for your init system."
+}
+
+linux_install() {
+    linux_require_systemd
+    _bin=$(find_nbusd)
+    mkdir -p "$(dirname -- "$SYSTEMD_UNIT_DST")"
+    # Emit the embedded unit with the real binary path interpolated.
+    emit_systemd_unit "$_bin" > "$SYSTEMD_UNIT_DST"
+    systemctl --user daemon-reload
+    systemctl --user enable --now nbusd
+    info "Installed systemd user service -> $SYSTEMD_UNIT_DST"
+    info "  binary : $_bin"
+    info "  logs   : journalctl --user -u nbusd -f"
+    info "  status : nbus-service status"
+}
+
+linux_uninstall() {
+    linux_require_systemd
+    # Idempotent: ignore failures if it was never enabled/running.
+    systemctl --user disable --now nbusd 2>/dev/null || true
+    rm -f "$SYSTEMD_UNIT_DST"
+    systemctl --user daemon-reload
+    info "Removed systemd user service ($SYSTEMD_UNIT_DST)."
+}
+
+linux_start()   { linux_require_systemd; systemctl --user start nbusd;   info "nbusd started."; }
+linux_stop()    { linux_require_systemd; systemctl --user stop nbusd;    info "nbusd stopped."; }
+linux_restart() { linux_require_systemd; systemctl --user restart nbusd; info "nbusd restarted."; }
+linux_status()  {
+    linux_require_systemd
+    # `status` returns non-zero when inactive; don't let set -e abort.
+    systemctl --user status nbusd --no-pager || true
+}
+
+# ── macOS / launchd ──────────────────────────────────────────────────
+launchd_domain() { printf 'gui/%s' "$(id -u)"; }
+
+mac_install() {
+    _bin=$(find_nbusd)
+    mkdir -p "$(dirname -- "$LAUNCHD_PLIST_DST")"
+    mkdir -p "$HOME/Library/Logs"
+    # Emit the embedded plist with binary path and HOME interpolated.
+    emit_launchd_plist "$_bin" "$HOME" > "$LAUNCHD_PLIST_DST"
+    # Idempotent: remove any prior instance before (re)loading.
+    launchctl bootout "$(launchd_domain)/$LABEL" 2>/dev/null || true
+    launchctl bootstrap "$(launchd_domain)" "$LAUNCHD_PLIST_DST"
+    info "Installed launchd LaunchAgent -> $LAUNCHD_PLIST_DST"
+    info "  binary : $_bin"
+    info "  logs   : $HOME/Library/Logs/nbusd.out.log , $HOME/Library/Logs/nbusd.err.log"
+    info "  status : nbus-service status"
+}
+
+mac_uninstall() {
+    launchctl bootout "$(launchd_domain)/$LABEL" 2>/dev/null || true
+    rm -f "$LAUNCHD_PLIST_DST"
+    info "Removed launchd LaunchAgent ($LAUNCHD_PLIST_DST)."
+}
+
+mac_start()   { launchctl kickstart    "$(launchd_domain)/$LABEL";    info "nbusd started."; }
+mac_stop()    { launchctl kill SIGTERM "$(launchd_domain)/$LABEL";    info "nbusd stopped."; }
+mac_restart() { launchctl kickstart -k "$(launchd_domain)/$LABEL";    info "nbusd restarted."; }
+mac_status()  {
+    if launchctl print "$(launchd_domain)/$LABEL" >/dev/null 2>&1; then
+        info "nbusd: loaded ($LABEL)"
+        launchctl print "$(launchd_domain)/$LABEL" | grep -E 'state|pid' || true
+    else
+        info "nbusd: not loaded (run 'nbus-service install')."
+    fi
+}
+
+# ── dispatch ─────────────────────────────────────────────────────────
+[ "$#" -ge 1 ] || usage
+cmd=$1
+
+case "$(os)" in
+    Linux)
+        case "$cmd" in
+            install)   linux_install ;;
+            uninstall) linux_uninstall ;;
+            start)     linux_start ;;
+            stop)      linux_stop ;;
+            restart)   linux_restart ;;
+            status)    linux_status ;;
+            *)         usage ;;
+        esac
+        ;;
+    Darwin)
+        case "$cmd" in
+            install)   mac_install ;;
+            uninstall) mac_uninstall ;;
+            start)     mac_start ;;
+            stop)      mac_stop ;;
+            restart)   mac_restart ;;
+            status)    mac_status ;;
+            *)         usage ;;
+        esac
+        ;;
+    *)
+        die "unsupported OS '$(os)'. Only Linux (systemd) and macOS (launchd) are supported."
+        ;;
+esac

@@ -74,9 +74,21 @@ for entry in "${TARGETS[@]}"; do
   suffix="${entry##*:}"
   build_one "$DAEMON_ENTRY" "$OUT_DIR/nbusd-$suffix" "$target"
   build_one "$CLI_ENTRY"    "$OUT_DIR/nbus-$suffix"  "$target"
+
+  # Per-platform tarball bundling both binaries under their bare names
+  # (nbusd, nbus) — this is what the Homebrew formula installs (one url/sha
+  # per platform). Staged in a temp dir so the archive members are unsuffixed.
+  stage="$(mktemp -d)"
+  cp "$OUT_DIR/nbusd-$suffix" "$stage/nbusd"
+  cp "$OUT_DIR/nbus-$suffix"  "$stage/nbus"
+  chmod +x "$stage/nbusd" "$stage/nbus"
+  tar -czf "$OUT_DIR/nbus-$suffix.tar.gz" -C "$stage" nbusd nbus
+  rm -rf "$stage"
 done
 
-# Checksums (portable: shasum on macOS, sha256sum on Linux).
+# Checksums over every artifact — bare binaries (nbusd-*, nbus-*-<arch>) and
+# tarballs (nbus-*.tar.gz) are all matched by the two globs.
+# (portable: shasum on macOS, sha256sum on Linux).
 echo "generating SHA256SUMS"
 cd "$OUT_DIR"
 if command -v sha256sum >/dev/null 2>&1; then
